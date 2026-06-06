@@ -1,26 +1,6 @@
-# Self-host compose for Budget Tracker.
-#
-# Usage:
-#   1. Place .env.production NEXT TO this compose file's project root (the
-#      repo root is the standard spot). It contains DB password + auth
-#      secrets + frontend build values — DO NOT bake it into images.
-#   2. Point DNS A records for both SELFHOST_FRONTEND_DOMAIN and
-#      SELFHOST_API_DOMAIN at this host's public IP.
-#   3. From the repo root:
-#      docker compose --env-file .env.production \
-#        -f docker/prod/docker-compose.yml up -d --build
-#
-# Traefik is bundled and handles TLS via Let's Encrypt (TLS-ALPN challenge,
-# port 443 must be reachable). For localhost / no-TLS dev, see
-# docker-compose.localhost.yml.
-#
-# Daisy's prod (Dokploy-managed) does NOT use this file — Dokploy provides
-# Traefik externally on `dokploy-network`.
+# Self-host compose for Budget Tracker — MODIFIED for TrueNAS SCALE + existing Cloudflare Tunnel.
+# Komodo Git Repo mode, Run Directory = docker/prod
 
-# Pin the compose project name so resources are namespaced consistently
-# regardless of which directory `docker compose` is invoked from. Without
-# this, the project name defaults to the parent directory (`prod`), which
-# silently collides with any other stack the user has named `prod`.
 name: budget-tracker-prod
 
 x-logging: &default-logging
@@ -30,67 +10,28 @@ x-logging: &default-logging
     max-file: '3'
 
 services:
-  traefik:
-    image: traefik:v3.2
-    restart: unless-stopped
-    networks: [selfhost]
-    ports:
-      # Defaults are 80/443. Override only if you front Traefik with another
-      # proxy or already use those ports — Let's Encrypt TLS-ALPN-01 still
-      # needs port 443 reachable on the public IP.
-      - '${TRAEFIK_HTTP_PORT:-80}:80'
-      - '${TRAEFIK_HTTPS_PORT:-443}:443'
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      - traefik_letsencrypt:/letsencrypt
-    command:
-      - --providers.docker=true
-      - --providers.docker.exposedByDefault=false
-      - --providers.docker.network=selfhost
-      - --entrypoints.web.address=:80
-      - --entrypoints.web.http.redirections.entrypoint.to=websecure
-      - --entrypoints.web.http.redirections.entrypoint.scheme=https
-      - --entrypoints.websecure.address=:443
-      # `:?` syntax: compose-up FAILS if LETSENCRYPT_EMAIL is unset/empty.
-      # Without this, Traefik would boot fine but ACME registration would
-      # silently fail at first HTTPS request.
-      - --certificatesresolvers.letsencrypt.acme.email=${LETSENCRYPT_EMAIL:?LETSENCRYPT_EMAIL is required for Let\'s Encrypt}
-      - --certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json
-      - --certificatesresolvers.letsencrypt.acme.tlschallenge=true
-    logging: *default-logging
-
   backend:
     build:
       context: ../../
       dockerfile: docker/prod/backend/Dockerfile
     restart: unless-stopped
     networks: [selfhost]
-    expose: ['${APPLICATION_PORT:-8081}']
+    ports:
+      - '${BACKEND_HOST_PORT:-8091}:${APPLICATION_PORT:-8081}'
     depends_on:
       db: { condition: service_healthy }
       redis: { condition: service_healthy }
       frankfurter: { condition: service_healthy }
       currency-rates-api: { condition: service_healthy }
-    env_file: ../../.env.production
-    labels:
-      - 'traefik.enable=true'
-      - 'traefik.http.routers.backend.rule=Host(`${SELFHOST_API_DOMAIN}`)'
-      - 'traefik.http.routers.backend.entrypoints=websecure'
-      - 'traefik.http.routers.backend.tls=true'
-      - 'traefik.http.routers.backend.tls.certresolver=letsencrypt'
-      - 'traefik.http.services.backend.loadbalancer.server.port=${APPLICATION_PORT:-8081}'
+    env_file: ../../.env
     logging: *default-logging
 
   frontend:
-    # Frontend image is static nginx — no runtime env_file. All values
-    # needed by the Vue bundle are baked in at build via build args. Keeping
-    # `.env.production` out of the image avoids leaking DB / auth secrets
-    # into pushed image layers.
     build:
       context: ../../
       dockerfile: docker/prod/frontend/Dockerfile
       args:
-        VITE_APP_API_HTTP: ${VITE_APP_API_HTTP:?VITE_APP_API_HTTP is required (e.g. https://api.example.com)}
+        VITE_APP_API_HTTP: ${VITE_APP_API_HTTP:?VITE_APP_API_HTTP is required (e.g. https://budget-api.acmhq.net)}
         VITE_APP_API_VER: ${VITE_APP_API_VER:-/api/v1}
         VITE_MCP_BASE_URL: ${VITE_MCP_BASE_URL:-}
         VITE_POSTHOG_KEY: ${VITE_POSTHOG_KEY:-}
@@ -107,13 +48,8 @@ services:
     restart: unless-stopped
     networks: [selfhost]
     depends_on: [backend]
-    labels:
-      - 'traefik.enable=true'
-      - 'traefik.http.routers.frontend.rule=Host(`${SELFHOST_FRONTEND_DOMAIN}`)'
-      - 'traefik.http.routers.frontend.entrypoints=websecure'
-      - 'traefik.http.routers.frontend.tls=true'
-      - 'traefik.http.routers.frontend.tls.certresolver=letsencrypt'
-      - 'traefik.http.services.frontend.loadbalancer.server.port=80'
+    ports:
+      - '${FRONTEND_HOST_PORT:-8090}:80'
     logging: *default-logging
 
   db:
@@ -121,8 +57,6 @@ services:
     restart: unless-stopped
     networks: [selfhost]
     volumes: ['db_data:/var/lib/postgresql/data']
-    # Bound to localhost only — admin access via SSH tunnel, never public.
-    # Override DB_HOST_PORT if 5432 is already used on the host.
     ports: ['127.0.0.1:${DB_HOST_PORT:-5432}:5432']
     environment:
       - POSTGRES_USER=${APPLICATION_DB_USERNAME}
@@ -139,8 +73,6 @@ services:
     restart: unless-stopped
     networks: [selfhost]
     volumes: ['redis_data:/data']
-    # Bound to localhost only — admin access via SSH tunnel, never public.
-    # Override REDIS_HOST_PORT if 6379 is already used on the host.
     ports: ['127.0.0.1:${REDIS_HOST_PORT:-6379}:6379']
     healthcheck:
       test: ['CMD', 'redis-cli', 'ping']
@@ -163,8 +95,6 @@ services:
       - 'SYNC_CRON=0 0 8,12,16,20 * * *'
       - RUST_LOG=currency_rates=info,tower_http=info
     healthcheck:
-      # `--spider` makes a HEAD request; modern wget (incl. BusyBox) returns
-      # non-zero on HTTP errors. Verified against the upstream image.
       test: ['CMD', 'wget', '-q', '--spider', 'http://localhost:8080/health']
       interval: 30s
       timeout: 10s
@@ -176,7 +106,6 @@ services:
     image: lineofflight/frankfurter
     restart: unless-stopped
     networks: [selfhost]
-    # The image ships ruby, not wget/curl/nc — use ruby for the TCP probe.
     healthcheck:
       test: ['CMD', 'ruby', '-rsocket', '-e', 'TCPSocket.new("localhost", 8080).close']
       interval: 30s
@@ -194,4 +123,3 @@ volumes:
   db_data:
   redis_data:
   currency_rates_data:
-  traefik_letsencrypt:
