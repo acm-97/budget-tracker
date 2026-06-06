@@ -114,10 +114,6 @@ services:
       start_period: 30s
     logging: *default-logging
 
-  cloudflared:
-    image: cloudflare/cloudflared:latest
-    command: tunnel --no-autoupdate run --token ${CF_TUNNEL_TOKEN}
-
 networks:
   selfhost:
     name: selfhost
