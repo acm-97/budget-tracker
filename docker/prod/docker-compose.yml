@@ -114,6 +114,10 @@ services:
       start_period: 30s
     logging: *default-logging
 
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    command: tunnel --no-autoupdate run --token ${CF_TUNNEL_TOKEN}
+
 networks:
   selfhost:
     name: selfhost
@@ -124,9 +128,3 @@ volumes:
   redis_data:
   currency_rates_data:
 
-ingress:
-  - hostname: budget-api.acmhq.net
-    service: http://192.168.1.228:8091   # must point at the API container
-  - hostname: budget.acmhq.net
-    service: http://192.168.1.228:8090
-  - service: http_status:404         # catch-all — this is what's answering you now
